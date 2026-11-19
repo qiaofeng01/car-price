@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>车价测算</title>
+<style>
+:root{--ink:#1a346e;--blue:#2c6fda;--bg:#f4f6f9;--line:#e2e8f2;--gray:#5a6b85;--red:#c0392b;--green:#1a8a3c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:#22304a}
+.wrap{max-width:720px;margin:0 auto;padding:16px}
+h1{font-size:18px;margin:8px 0 2px;color:var(--ink)}
+.sub{font-size:12px;color:var(--gray);margin-bottom:14px}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.card h2{font-size:13px;color:var(--gray);font-weight:600;margin:0 0 10px;letter-spacing:.04em}
+select{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:9px;background:#fff;
+  font-size:15px;color:#22304a;margin-bottom:8px;appearance:none;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8'><path d='M1 1l5 5 5-5' stroke='%235a6b85' stroke-width='1.6' fill='none'/></svg>");
+  background-repeat:no-repeat;background-position:right 14px center}
+select:disabled{background-color:#f7f9fc;color:#9aa8bd}
+.row{display:flex;justify-content:space-between;align-items:baseline;padding:7px 0;border-bottom:1px dashed var(--line);font-size:14px}
+.row:last-of-type{border:0}
+.row b{font-weight:600}
+.row .hint{font-size:11px;color:#9aa8bd;font-weight:400;margin-left:6px}
+.discount{color:var(--red)}
+.plus{color:var(--gray)}
+.total{background:#eef4ff;border:1px solid #c7d8f5;border-radius:10px;padding:12px 14px;margin-top:10px;
+  display:flex;justify-content:space-between;align-items:baseline}
+.total span{font-size:13px;color:var(--blue)}
+.total b{font-size:24px;color:var(--ink)}
+.tip{font-size:12px;color:var(--gray);margin-top:8px;line-height:1.7}
+.err{background:#fdecea;border:1px solid #f0b4ac;color:#8e3b31;padding:10px 12px;border-radius:9px;font-size:13px}
+.foot{text-align:center;font-size:12px;color:var(--gray);margin:18px 0 8px;line-height:1.8}
+.tag{display:inline-block;background:#eef4ff;color:var(--blue);font-size:11px;padding:2px 7px;border-radius:6px;margin-left:6px}
+.warn{background:#fff8e6;border:1px solid #e8d5a0;color:#8a6d1f;font-size:12px;padding:8px 10px;border-radius:8px;margin-top:10px;line-height:1.6}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>车价测算</h1>
+  <div class="sub" id="stamp">正在加载车型库…</div>
+
+  <div id="err" class="err" style="display:none"></div>
+
+  <div class="card">
+    <h2>选择车型</h2>
+    <select id="brand"><option value="">品牌</option></select>
+    <select id="series" disabled><option value="">车系</option></select>
+    <select id="trim" disabled><option value="">配置</option></select>
+  </div>
+
+  <div class="card" id="result" style="display:none">
+    <h2>价格测算</h2>
+    <div class="row"><span>厂商指导价</span><b id="r-guide">—</b></div>
+    <div class="row" id="row-disc">
+      <span>网上参考优惠<span class="hint">经销商报价，仅供参考</span></span>
+      <b class="discount" id="r-disc">—</b>
+    </div>
+    <div class="row"><span>参考裸车价</span><b id="r-net">—</b></div>
+    <div class="row"><span>购置税<span class="hint">按参考裸车价 ÷ 1.13 × 10%</span></span><b id="r-tax">—</b></div>
+    <div class="row"><span>保险（交强+商业）</span><b class="plus" id="r-ins">—</b></div>
+    <div class="row"><span>上牌</span><b class="plus" id="r-reg">—</b></div>
+    <div class="total"><span>参考落地价</span><b id="r-total">—</b></div>
+    <div class="warn" id="r-note"></div>
+  </div>
+
+  <div class="foot">
+    数据每日自动更新 · 指导价来自厂商公布，优惠来自经销商参考报价<br>
+    一切以门店实际成交为准，本页仅供比价参考
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = n => "¥" + Math.round(n).toLocaleString("zh-CN");
+const wan = n => (n / 10000).toFixed(2) + " 万";
+let INDEX = null, DETAIL = null;
+
+function fail(msg){
+  const e = $("err"); e.style.display = "block"; e.textContent = msg;
+}
+
+async function loadIndex(){
+  try{
+    const r = await fetch("data/index.json", {cache:"no-store"});
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    INDEX = await r.json();
+    const c = INDEX.count || {};
+    $("stamp").textContent =
+      `数据更新于 ${INDEX.updated}　品牌 ${c.brands||0} · 车系 ${c.series||0} · 配置 ${c.trims||0}`;
+    const sel = $("brand");
+    INDEX.brands.forEach(b => {
+      const o = document.createElement("option");
+      o.value = b.id; o.textContent = `${b.name}（${b.n} 车系）`;
+      sel.appendChild(o);
+    });
+  }catch(err){
+    $("stamp").textContent = "车型库加载失败";
+    fail("读不到 data/index.json —— 本地请用 python -m http.server 打开，不要双击 html。" + err.message);
+  }
+}
+
+$("brand").addEventListener("change", async () => {
+  const id = $("brand").value;
+  const s = $("series"), t = $("trim");
+  s.innerHTML = '<option value="">车系</option>'; t.innerHTML = '<option value="">配置</option>';
+  s.disabled = true; t.disabled = true;
+  $("result").style.display = "none";
+  if(!id) return;
+  s.disabled = false; s.innerHTML = '<option>加载中…</option>';
+  try{
+    const r = await fetch(`data/brands/${id}.json`, {cache:"no-store"});
+    DETAIL = await r.json();
+    s.innerHTML = '<option value="">车系</option>';
+    DETAIL.series.forEach(x => {
+      const o = document.createElement("option");
+      o.value = x.id; o.textContent = x.name;
+      s.appendChild(o);
+    });
+  }catch(err){ fail("车系数据加载失败：" + err.message); }
+});
+
+$("series").addEventListener("change", () => {
+  const id = $("series").value, t = $("trim");
+  t.innerHTML = '<option value="">配置</option>'; t.disabled = !id;
+  $("result").style.display = "none";
+  if(!id || !DETAIL) return;
+  const s = DETAIL.series.find(x => x.id === id);
+  (s?.trims || []).forEach((tr, i) => {
+    const o = document.createElement("option");
+    o.value = i;
+    o.textContent = `${tr.year}款 ${tr.name}（${wan(tr.guide)}）`;
+    t.appendChild(o);
+  });
+});
+
+$("trim").addEventListener("change", () => {
+  const si = $("series").value, ti = $("trim").value;
+  if(ti === "" || !DETAIL) { $("result").style.display = "none"; return; }
+  const tr = DETAIL.series.find(x => x.id === si).trims[+ti];
+
+  // 参考裸车价：有经销商参考价就用它，否则退回指导价
+  const guide = tr.guide;
+  const dealer = (typeof tr.dealer === "number" && tr.dealer > 0 && tr.dealer < guide) ? tr.dealer : null;
+  const net = dealer || guide;
+  const disc = guide - net;
+
+  // 购置税：按参考裸车价 ÷ 1.13 × 10%；新能源 2026–2027 减半，单车上限 1.5 万
+  const ne = ["纯电","插电混动","增程","氢燃料"].includes(tr.energy);
+  let tax = net / 1.13 * 0.10;
+  if(ne) tax = Math.min(tax * 0.5, 15000);
+  tax = Math.round(tax);
+
+  const ins = Math.round(950 + net * 0.011);
+  const reg = 500;
+  const total = net + tax + ins + reg;
+
+  $("r-guide").textContent = fmt(guide);
+  if(dealer){
+    $("row-disc").style.display = "flex";
+    $("r-disc").textContent = "− " + fmt(disc) + "（" + (disc / guide * 100).toFixed(1) + "%）";
+  }else{
+    $("row-disc").style.display = "none";
+  }
+  $("r-net").textContent   = fmt(net);
+  $("r-tax").textContent   = fmt(tax);
+  $("r-ins").textContent   = fmt(ins);
+  $("r-reg").textContent   = fmt(reg);
+  $("r-total").textContent = fmt(total);
+
+  $("r-note").textContent = (ne
+      ? `${tr.energy}：购置税按减半计征，单车上限 1.5 万元。`
+      : `燃油车：购置税按 10% 计征。`)
+    + (dealer
+      ? `参考优惠取自经销商报价，实际能谈到多少取决于地区、库存与当月政策，请以门店报价为准。`
+      : `该车型暂未取到经销商参考价，以上按指导价估算。`);
+  $("result").style.display = "block";
+});
+
+loadIndex();
+</script>
+</body>
+</html>
