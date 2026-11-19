@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>车价测算 · 数据链路验证页</title>
+<style>
+:root{--ink:#1a346e;--blue:#2c6fda;--bg:#f4f6f9;--line:#e2e8f2;--gray:#5a6b85}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:#22304a}
+.wrap{max-width:720px;margin:0 auto;padding:16px}
+h1{font-size:18px;margin:8px 0 2px;color:var(--ink)}
+.sub{font-size:12px;color:var(--gray);margin-bottom:14px}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+.card h2{font-size:13px;color:var(--gray);font-weight:600;margin:0 0 10px;letter-spacing:.04em}
+select{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:9px;background:#fff;
+  font-size:15px;color:#22304a;margin-bottom:8px;appearance:none;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8'><path d='M1 1l5 5 5-5' stroke='%235a6b85' stroke-width='1.6' fill='none'/></svg>");
+  background-repeat:no-repeat;background-position:right 14px center}
+select:disabled{background-color:#f7f9fc;color:#9aa8bd}
+.row{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px dashed var(--line);font-size:14px}
+.row:last-child{border:0}
+.row b{font-weight:600}
+.total{background:#eef4ff;border:1px solid #c7d8f5;border-radius:10px;padding:12px 14px;margin-top:10px;
+  display:flex;justify-content:space-between;align-items:baseline}
+.total span{font-size:13px;color:var(--blue)}
+.total b{font-size:24px;color:var(--ink)}
+.tip{font-size:12px;color:var(--gray);margin-top:8px}
+.err{background:#fdecea;border:1px solid #f0b4ac;color:#8e3b31;padding:10px 12px;border-radius:9px;font-size:13px}
+.foot{text-align:center;font-size:12px;color:var(--gray);margin:18px 0 8px;line-height:1.8}
+.tag{display:inline-block;background:#eef4ff;color:var(--blue);font-size:11px;padding:2px 7px;border-radius:6px;margin-left:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>车价测算<span class="tag">链路验证页</span></h1>
+  <div class="sub" id="stamp">正在加载车型库…</div>
+
+  <div id="err" class="err" style="display:none"></div>
+
+  <div class="card">
+    <h2>选择车型</h2>
+    <select id="brand"><option value="">品牌</option></select>
+    <select id="series" disabled><option value="">车系</option></select>
+    <select id="trim" disabled><option value="">配置</option></select>
+  </div>
+
+  <div class="card" id="result" style="display:none">
+    <h2>价格测算（估算，未含优惠与金融方案）</h2>
+    <div class="row"><span>指导价</span><b id="r-guide">—</b></div>
+    <div class="row"><span>购置税</span><b id="r-tax">—</b></div>
+    <div class="row"><span>保险（交强+商业）</span><b id="r-ins">—</b></div>
+    <div class="row"><span>上牌</span><b id="r-reg">—</b></div>
+    <div class="total"><span>全款落地（估）</span><b id="r-total">—</b></div>
+    <div class="tip" id="r-note"></div>
+  </div>
+
+  <div class="foot">
+    数据由 GitHub Actions 每日生成 · 价格仅供参考，以门店成交为准<br>
+    本页仅用于验证"抓取 → JSON → 页面"链路，界面待替换
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = n => "¥" + n.toLocaleString("zh-CN");
+let INDEX = null, DETAIL = null;
+
+function fail(msg){
+  const e = $("err"); e.style.display = "block";
+  e.textContent = msg;
+}
+
+async function loadIndex(){
+  try{
+    const r = await fetch("data/index.json", {cache:"no-store"});
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    INDEX = await r.json();
+    const c = INDEX.count || {};
+    $("stamp").textContent =
+      `数据更新于 ${INDEX.updated}　品牌 ${c.brands||0} · 车系 ${c.series||0} · 配置 ${c.trims||0}`;
+    const sel = $("brand");
+    INDEX.brands.forEach(b => {
+      const o = document.createElement("option");
+      o.value = b.id; o.textContent = `${b.name}（${b.n} 车系）`;
+      sel.appendChild(o);
+    });
+  }catch(err){
+    $("stamp").textContent = "车型库加载失败";
+    fail("读不到 data/index.json —— 本地请用 python -m http.server 打开，不要双击 html。" + err.message);
+  }
+}
+
+$("brand").addEventListener("change", async () => {
+  const id = $("brand").value;
+  const s = $("series"), t = $("trim");
+  s.innerHTML = '<option value="">车系</option>'; t.innerHTML = '<option value="">配置</option>';
+  s.disabled = true; t.disabled = true;
+  $("result").style.display = "none";
+  if(!id) return;
+  s.disabled = false; s.innerHTML = '<option>加载中…</option>';
+  try{
+    const r = await fetch(`data/brands/${id}.json`, {cache:"no-store"});
+    DETAIL = await r.json();
+    s.innerHTML = '<option value="">车系</option>';
+    DETAIL.series.forEach(x => {
+      const o = document.createElement("option");
+      o.value = x.id; o.textContent = x.name;
+      s.appendChild(o);
+    });
+  }catch(err){ fail("车系数据加载失败：" + err.message); }
+});
+
+$("series").addEventListener("change", () => {
+  const id = $("series").value, t = $("trim");
+  t.innerHTML = '<option value="">配置</option>'; t.disabled = !id;
+  $("result").style.display = "none";
+  if(!id || !DETAIL) return;
+  const s = DETAIL.series.find(x => x.id === id);
+  (s?.trims || []).forEach((tr, i) => {
+    const o = document.createElement("option");
+    o.value = i; o.textContent = `${tr.year}款 ${tr.name}（${fmt(tr.guide)}）`;
+    t.appendChild(o);
+  });
+});
+
+$("trim").addEventListener("change", () => {
+  const si = $("series").value, ti = $("trim").value;
+  if(ti === "" || !DETAIL) { $("result").style.display="none"; return; }
+  const tr = DETAIL.series.find(x => x.id === si).trims[+ti];
+
+  // 购置税：价税合计 ÷ 1.13 × 10%；新能源 2026–2027 减半，单车上限 1.5 万
+  const ne = ["纯电","插电混动","增程","氢燃料"].includes(tr.energy);
+  let tax = tr.guide / 1.13 * 0.10;
+  if(ne) tax = Math.min(tax * 0.5, 15000);
+  tax = Math.round(tax);
+
+  const ins = Math.round(950 + tr.guide * 0.011);
+  const reg = 500;
+  const total = tr.guide + tax + ins + reg;
+
+  $("r-guide").textContent = fmt(tr.guide);
+  $("r-tax").textContent   = fmt(tax);
+  $("r-ins").textContent   = fmt(ins);
+  $("r-reg").textContent   = fmt(reg);
+  $("r-total").textContent = fmt(total);
+  $("r-note").textContent  = ne
+    ? `${tr.energy}：购置税按减半计征，上限 1.5 万元。保险与上牌为估值，实际以门店报价为准。`
+    : `燃油车：购置税按 10% 计征。保险与上牌为估值，实际以门店报价为准。`;
+  $("result").style.display = "block";
+});
+
+loadIndex();
+</script>
+</body>
+</html>
