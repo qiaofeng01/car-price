@@ -132,30 +132,132 @@ class DemoAdapter(Adapter):
         return out
 
 
-class AutoHomeAdapter(Adapter):
-    """汽车之家适配器（待实现）。
+def guess_energy(fuel_form):
+    s = str(fuel_form or "")
+    if "插电" in s or "PHEV" in s.upper():
+        return "插电混动"
+    if "增程" in s:
+        return "增程"
+    if "纯电" in s or s.strip() in ("电动", "纯电动"):
+        return "纯电"
+    if "混" in s or "HEV" in s.upper():
+        return "混动"
+    if "氢" in s:
+        return "氢燃料"
+    return "燃油"
 
-    实现要点：
-      1. 品牌/车系列表页：解析即可，结构相对稳定
-      2. 指导价：注意字体加密（woff 里的字符映射），先建 map 再取数
-      3. 分页 + 限速，单品牌抓完 sleep 1s
-    自测：
-      python scripts/fetch.py --brand vw --limit 3 -v
+
+class DongchediAdapter(Adapter):
+    """懂车帝适配器（免登录 JSON 接口，2026-11 实测可用）。
+
+    三条接口：
+      1. 榜单   /motor/pc/car/rank_data              → 车系、品牌、在售车款 id
+      2. 车系头 /motor/car_page/m/v1/get_head        → car_id_list 兜底
+      3. 车款   /motor/car_page/v4/get_entity_json   → 逐款指导价（万元，需 ×10000）
+
+    注意：
+      - 指导价单位是「万元」，必须 ×10000
+      - 站点有频控，默认 0.8s/次；被拦截会返回空或 login-required
+      - 覆盖率以「在售且有销量记录的车系」为主，冷门/停售车系可能缺失
     """
 
-    BASE = "https://www.autohome.com.cn"
+    BASE = "https://www.dongchedi.com"
+    BATCH = 10          # 一次请求取几个车款
+    RANK_PAGES = 40     # 榜单最多翻 40 页（50/页 ≈ 2000 个车系）
+
+    def __init__(self, city="广州", limit_series=0, verbose=False):
+        self.city = city
+        self.limit_series = limit_series
+        self.verbose = verbose
+        self._enum = None
+        self._by_id = {}
+
+    # ---------- 底层 ----------
+    def _json(self, path, **params):
+        r = get(self.BASE + path, params=params,
+                headers={"Referer": self.BASE + "/auto/library"})
+        try:
+            return r.json()
+        except Exception:
+            raise RuntimeError(f"返回非 JSON（可能被风控）：{(r.text or '')[:160]}")
+
+    # ---------- 枚举 ----------
+    def _enumerate(self):
+        if self._enum is not None:
+            return self._enum
+        enum, seen = {}, set()
+        for page in range(self.RANK_PAGES):
+            data = self._json("/motor/pc/car/rank_data", aid=1839, app_name="auto_web_pc",
+                              count=50, offset=page * 50, rank_data_type=11)
+            lst = ((data.get("data") or {}).get("list")) or []
+            if not lst:
+                break
+            for it in lst:
+                sid = str(it.get("series_id") or "")
+                if not sid or sid in seen:
+                    continue
+                seen.add(sid)
+                brand = (it.get("brand_name") or "其他").strip()
+                bid = str(it.get("brand_id") or slug(brand))   # 优先用数字 id，URL 更稳
+                enum.setdefault(bid, {"name": brand, "series": {}})["series"][sid] = {
+                    "id": sid,
+                    "name": (it.get("series_name") or "").strip(),
+                    "car_ids": [str(c) for c in (it.get("online_car_ids") or [])],
+                }
+            if self.verbose and page % 5 == 0:
+                log(f"  枚举第 {page + 1} 页，累计车系 {len(seen)}")
+            if len(lst) < 50:
+                break
+        if not seen:
+            raise RuntimeError("榜单接口返回空：可能被风控，或接口已变更")
+        self._enum = enum
+        for b in enum.values():
+            for sid, s in b["series"].items():
+                self._by_id[sid] = s
+        log(f"枚举完成：{len(enum)} 个品牌 / {len(seen)} 个车系")
+        return enum
 
     def brands(self):
-        # TODO: 抓品牌页，解析出 id/name
-        raise NotImplementedError("待实现：品牌列表解析")
+        return [{"id": bid, "name": b["name"]} for bid, b in self._enumerate().items()]
 
     def series(self, brand_id):
-        # TODO: 抓品牌下车系列表
-        raise NotImplementedError("待实现：车系列表解析")
+        out = list(self._enumerate().get(brand_id, {}).get("series", {}).values())
+        return out[:self.limit_series] if self.limit_series else out
+
+    # ---------- 车款 ----------
+    def _car_ids(self, s):
+        if s.get("car_ids"):
+            return s["car_ids"]
+        head = self._json("/motor/car_page/m/v1/get_head/",
+                          series_id=s["id"], city_name=self.city, data_from="pc_station")
+        return [x for x in (head.get("car_id_list") or "").split(",") if x]
 
     def trims(self, series_id):
-        # TODO: 抓该车系配置页，注意指导价字体解密
-        raise NotImplementedError("待实现：配置与指导价解析")
+        self._enumerate()
+        s = self._by_id.get(str(series_id))
+        if s is None:
+            raise RuntimeError(f"车系 {series_id} 不在枚举结果中")
+        ids = self._car_ids(s)
+        out = []
+        for i in range(0, len(ids), self.BATCH):
+            data = self._json("/motor/car_page/v4/get_entity_json/",
+                              car_id_list=",".join(ids[i:i + self.BATCH]), city_name=self.city)
+            for c in ((data.get("data") or {}).get("car_info") or []):
+                info = c.get("info") or {}
+                val = (info.get("official_price") or {}).get("compare_value")
+                if not isinstance(val, (int, float)):
+                    try:
+                        val = float(str(c.get("official_price") or "").replace("万", ""))
+                    except Exception:
+                        continue
+                out.append({
+                    "year": str(c.get("car_year") or ""),
+                    "name": (c.get("car_name") or "").strip(),
+                    "guide": int(round(float(val) * 10000)),
+                    "energy": guess_energy((info.get("fuel_form") or {}).get("value")),
+                    "disp": (info.get("capacity_l") or {}).get("value") or "",
+                })
+        return out
 
 
 # ----------------------------------------------------------------- 校验
@@ -261,10 +363,14 @@ def main():
     ap.add_argument("--demo", action="store_true", help="用示例数据")
     ap.add_argument("--brand", help="只跑某个品牌 id")
     ap.add_argument("--limit", type=int, default=0, help="每品牌最多几个车系")
+    ap.add_argument("--city", default="广州", help="报价城市，影响经销商价（指导价全国一致）")
     ap.add_argument("--verbose", "-v", action="store_true")
     a = ap.parse_args()
 
-    adapter = DemoAdapter() if a.demo else AutoHomeAdapter()
+    if a.demo:
+        adapter = DemoAdapter()
+    else:
+        adapter = DongchediAdapter(city=a.city, verbose=a.verbose)
     build(adapter, a.out, only_brand=a.brand, limit=a.limit)
 
 
